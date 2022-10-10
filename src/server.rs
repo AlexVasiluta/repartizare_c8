@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use crate::county::County;
 use crate::dbmgr::{FullSchool, DB};
+use axum::handler::Handler;
+use axum::response::IntoResponse;
 use axum::{extract::Path, response::Json, routing::get, Extension, Router};
 use serde::ser::SerializeMap;
 use serde::Serialize;
@@ -46,13 +48,21 @@ async fn school(
     }
 }
 
+async fn callback() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Status::<()>::error("404 Not Found".to_string()),
+    )
+}
+
 pub async fn run_server(db_prefix: String, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/adm_api/years", get(years))
         .route("/adm_api/:year/counties", get(counties))
         .route("/adm_api/:year/:county/schools", get(schools))
         .route("/adm_api/:year/:county/fullSchool/:school", get(school))
-        .layer(Extension(Arc::new(DB::new(db_prefix))));
+        .layer(Extension(Arc::new(DB::new(db_prefix))))
+        .fallback(callback.into_service());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     axum::Server::bind(&addr)
