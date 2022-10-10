@@ -8,17 +8,22 @@ const AVAILABLE_YEARS: [i32; 3] = [2020, 2021, 2022];
 const PORT: i32 = 8095;
 
 struct DB {
+    prefix: std::path::PathBuf,
     pools: Arc<RwLock<std::collections::HashMap<i32, sqlx::SqlitePool>>>,
 }
 
 impl DB {
-    fn new() -> DB {
+    fn new(prefix: String) -> DB {
         DB {
+            prefix: std::path::Path::new(prefix.as_str()).to_owned(),
             pools: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
-    async fn get_year_pool(&self, year: i32) -> Result<sqlx::SqlitePool, sqlx::Error> {
+    async fn get_year_pool(
+        &self,
+        year: i32,
+    ) -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
         let pools = self.pools.read().await;
 
         if let Some(pool) = pools.get(&year) {
@@ -29,7 +34,18 @@ impl DB {
 
         let mut pools = self.pools.write().await;
 
-        let pool = db::create_pool(format!("sqlite://{year}.db").as_str(), false).await?;
+        let pool = db::create_pool(
+            format!(
+                "sqlite://{}",
+                self.prefix
+                    .join(format!("{year}.db"))
+                    .to_str()
+                    .ok_or("Failed to create db path")?
+            )
+            .as_str(),
+            false,
+        )
+        .await?;
         if let Some(old_pool) = pools.insert(year, pool) {
             old_pool.close().await
         }
@@ -37,7 +53,10 @@ impl DB {
         Ok(pools.get(&year).unwrap().clone())
     }
 
-    async fn get_counties(&self, year: i32) -> Result<Vec<county::County>, sqlx::Error> {
+    async fn get_counties(
+        &self,
+        year: i32,
+    ) -> Result<Vec<county::County>, Box<dyn std::error::Error>> {
         let pool = self.get_year_pool(year).await?;
         let counties =
             sqlx::query_as::<_, county::County>("SELECT * FROM counties ORDER BY code ASC;")
@@ -47,7 +66,11 @@ impl DB {
         Ok(counties)
     }
 
-    async fn get_schools(&self, year: i32, county: &str) -> Result<Vec<String>, sqlx::Error> {
+    async fn get_schools(
+        &self,
+        year: i32,
+        county: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let pool = self.get_year_pool(year).await?;
 
         #[derive(sqlx::FromRow)]
@@ -70,7 +93,7 @@ impl DB {
         year: i32,
         county: &str,
         school: &str,
-    ) -> Result<FullSchool, sqlx::Error> {
+    ) -> Result<FullSchool, Box<dyn std::error::Error>> {
         let pool = self.get_year_pool(year).await?;
 
         let specs = sqlx::query_as::<_, SpecShort>(
@@ -152,10 +175,9 @@ async fn school(
     }
 }
 
-#[rocket::main]
-pub async fn run_server() -> Result<(), rocket::Error> {
+pub async fn run_server(db_prefix: String) -> Result<(), rocket::Error> {
     let _rocket = rocket::custom(rocket::Config::figment().merge(("port", PORT)))
-        .manage(DB::new())
+        .manage(DB::new(db_prefix))
         .mount("/adm_api", routes![years, counties, schools, school])
         .launch()
         .await?;

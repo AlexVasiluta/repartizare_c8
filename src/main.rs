@@ -22,20 +22,24 @@ struct Args {
 #[derive(Subcommand)]
 enum Commands {
     Generator { year: i32 },
-    Server,
+    Server { prefix: String },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Args::parse();
 
     match cli.command {
         Commands::Generator { year } => {
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(year_gen::do_year(year))?;
+            year_gen::do_year(year).await?;
         }
-        Commands::Server => {
-            server::run_server()?;
+        Commands::Server { prefix } => {
+            let p = if prefix.is_empty() {
+                String::from("./")
+            } else {
+                prefix
+            };
+            server::run_server(p).await?;
         }
     };
     Ok(())
