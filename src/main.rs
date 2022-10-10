@@ -1,15 +1,4 @@
 use clap::{Parser, Subcommand};
-#[macro_use]
-extern crate rocket;
-
-mod db;
-
-mod county;
-mod specializare;
-mod student;
-
-mod server;
-mod year_gen;
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -21,8 +10,15 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Commands {
-    Generator { year: i32 },
-    Server { prefix: String },
+    Generator {
+        year: i32,
+    },
+    Server {
+        #[clap(long, default_value_t = String::from("./"))]
+        path: String,
+        #[clap(short, long, default_value_t = 8095)]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -31,15 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Generator { year } => {
-            year_gen::do_year(year).await?;
+            println!("Generating year {year}");
+            repartizare_c8::year_gen::do_year(year).await?;
         }
-        Commands::Server { prefix } => {
-            let p = if prefix.is_empty() {
-                String::from("./")
-            } else {
-                prefix
-            };
-            server::run_server(p).await?;
+        Commands::Server { path, port } => {
+            println!("Starting server, listening on port {port}, serving from '{path}' ");
+            repartizare_c8::server::run_server(path, port).await?;
         }
     };
     Ok(())

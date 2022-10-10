@@ -1,128 +1,91 @@
-use crate::*;
-use rocket::serde::{json::Json, Serialize};
-use serde::ser::SerializeMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+
+use crate::county::County;
+use crate::dbmgr::{FullSchool, DB};
+use axum::{extract::Path, response::Json, routing::get, Extension, Router};
+use serde::ser::SerializeMap;
+use serde::Serialize;
 
 const AVAILABLE_YEARS: [i32; 3] = [2020, 2021, 2022];
-const PORT: i32 = 8095;
 
-struct DB {
-    prefix: std::path::PathBuf,
-    pools: Arc<RwLock<std::collections::HashMap<i32, sqlx::SqlitePool>>>,
+async fn years() -> Json<Status<Vec<i32>>> {
+    Status::success(Vec::from(AVAILABLE_YEARS))
 }
 
-impl DB {
-    fn new(prefix: String) -> DB {
-        DB {
-            prefix: std::path::Path::new(prefix.as_str()).to_owned(),
-            pools: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        }
+async fn counties(
+    Extension(db): Extension<Arc<DB>>,
+    Path(year): Path<i32>,
+) -> Json<Status<Vec<County>>> {
+    match db.get_counties(year).await {
+        Ok(counties) => Status::success(counties),
+        Err(err) => Status::error(err.to_string()),
     }
+}
 
-    async fn get_year_pool(
-        &self,
-        year: i32,
-    ) -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
-        let pools = self.pools.read().await;
-
-        if let Some(pool) = pools.get(&year) {
-            return Ok(pool.clone());
-        }
-
-        drop(pools);
-
-        let mut pools = self.pools.write().await;
-
-        let pool = db::create_pool(
-            format!(
-                "sqlite://{}",
-                self.prefix
-                    .join(format!("{year}.db"))
-                    .to_str()
-                    .ok_or("Failed to create db path")?
-            )
-            .as_str(),
-            false,
-        )
-        .await?;
-        if let Some(old_pool) = pools.insert(year, pool) {
-            old_pool.close().await
-        }
-
-        Ok(pools.get(&year).unwrap().clone())
+async fn schools(
+    Extension(db): Extension<Arc<DB>>,
+    Path((year, county)): Path<(i32, String)>,
+) -> Json<Status<Vec<String>>> {
+    match db.get_schools(year, county.as_str()).await {
+        Ok(schools) => Status::success(schools),
+        Err(err) => Status::error(err.to_string()),
     }
+}
 
-    async fn get_counties(
-        &self,
-        year: i32,
-    ) -> Result<Vec<county::County>, Box<dyn std::error::Error>> {
-        let pool = self.get_year_pool(year).await?;
-        let counties =
-            sqlx::query_as::<_, county::County>("SELECT * FROM counties ORDER BY code ASC;")
-                .fetch_all(&pool)
-                .await?;
-
-        Ok(counties)
+async fn school(
+    Extension(db): Extension<Arc<DB>>,
+    Path((year, county, school)): Path<(i32, String, String)>,
+) -> Json<Status<FullSchool>> {
+    match db
+        .get_full_school(year, county.as_str(), school.as_str())
+        .await
+    {
+        Ok(school) => Status::success(school),
+        Err(err) => Status::error(err.to_string()),
     }
+}
 
-    async fn get_schools(
-        &self,
-        year: i32,
-        county: &str,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let pool = self.get_year_pool(year).await?;
+pub async fn run_server(db_prefix: String, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new()
+        .route("/adm_api/years", get(years))
+        .route("/adm_api/:year/counties", get(counties))
+        .route("/adm_api/:year/:county/schools", get(schools))
+        .route("/adm_api/:year/:county/fullSchool/:school", get(school))
+        .layer(Extension(Arc::new(DB::new(db_prefix))));
 
-        #[derive(sqlx::FromRow)]
-        struct Result {
-            liceu: String,
-        }
-
-        let schools = sqlx::query_as::<_, Result>(
-            "SELECT liceu FROM specializari WHERE judet = ? GROUP BY liceu ORDER BY liceu ASC",
-        )
-        .bind(county)
-        .fetch_all(&pool)
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
         .await?;
 
-        Ok(schools.iter().map(|x| x.liceu.clone()).collect())
+    Ok(())
+}
+
+impl Serialize for County {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("code", self.code.as_str())?;
+        map.serialize_entry("name", self.name.as_str())?;
+        map.end()
     }
+}
 
-    async fn get_full_school(
-        &self,
-        year: i32,
-        county: &str,
-        school: &str,
-    ) -> Result<FullSchool, Box<dyn std::error::Error>> {
-        let pool = self.get_year_pool(year).await?;
+#[derive(Serialize)]
+#[serde(untagged)]
+enum StatusData<T> {
+    Success(T),
+    Error(String),
+}
 
-        let specs = sqlx::query_as::<_, SpecShort>(
-            "SELECT id, name FROM specializari WHERE judet = ? AND liceu = ? ORDER BY id ASC",
-        )
-        .bind(county)
-        .bind(school)
-        .fetch_all(&pool)
-        .await?;
-
-        let mut school = FullSchool {
-            specializari: std::collections::HashMap::new(),
-            specializari_short: specs,
-        };
-
-        for spec in &school.specializari_short {
-            school.specializari.insert(spec.id, FullSpec {
-                elevi: sqlx::query_as::<_, student::Student>(
-                    "SELECT * FROM students WHERE judet = ? AND id_specializare = ? ORDER BY medie_adm DESC",
-                ).bind(county).bind(spec.id).fetch_all(&pool).await?,
-
-                spec: sqlx::query_as::<_, specializare::Specializare>(
-                    "SELECT * FROM specializari WHERE judet = ? AND id = ?",
-                ).bind(county).bind(spec.id).fetch_one(&pool).await?,
-            });
-        }
-
-        Ok(school)
-    }
+#[derive(Serialize)]
+struct Status<T> {
+    #[serde(rename = "type")]
+    result_type: String,
+    data: StatusData<T>,
 }
 
 impl<T> Status<T> {
@@ -139,95 +102,4 @@ impl<T> Status<T> {
             data: StatusData::Error(data),
         })
     }
-}
-
-#[get("/years")]
-fn years() -> Json<Status<Vec<i32>>> {
-    Status::success(Vec::from(AVAILABLE_YEARS))
-}
-
-#[get("/<year>/counties")]
-async fn counties(db: &rocket::State<DB>, year: i32) -> Json<Status<Vec<county::County>>> {
-    match db.get_counties(year).await {
-        Ok(counties) => Status::success(counties),
-        Err(err) => Status::error(err.to_string()),
-    }
-}
-
-#[get("/<year>/<county>/schools")]
-async fn schools(db: &rocket::State<DB>, year: i32, county: &str) -> Json<Status<Vec<String>>> {
-    match db.get_schools(year, county).await {
-        Ok(schools) => Status::success(schools),
-        Err(err) => Status::error(err.to_string()),
-    }
-}
-
-#[get("/<year>/<county>/fullSchool/<school>")]
-async fn school(
-    db: &rocket::State<DB>,
-    year: i32,
-    county: &str,
-    school: &str,
-) -> Json<Status<FullSchool>> {
-    match db.get_full_school(year, county, school).await {
-        Ok(school) => Status::success(school),
-        Err(err) => Status::error(err.to_string()),
-    }
-}
-
-pub async fn run_server(db_prefix: String) -> Result<(), rocket::Error> {
-    let _rocket = rocket::custom(rocket::Config::figment().merge(("port", PORT)))
-        .manage(DB::new(db_prefix))
-        .mount("/adm_api", routes![years, counties, schools, school])
-        .launch()
-        .await?;
-
-    Ok(())
-}
-
-impl Serialize for county::County {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry("code", self.code.as_str())?;
-        map.serialize_entry("name", self.name.as_str())?;
-        map.end()
-    }
-}
-
-#[derive(Serialize, sqlx::FromRow)]
-struct SpecShort {
-    id: i32,
-    name: String,
-}
-
-#[derive(Serialize)]
-struct FullSpec {
-    elevi: Vec<student::Student>,
-    #[serde(rename = "sp")]
-    spec: specializare::Specializare,
-}
-
-#[derive(Serialize)]
-struct FullSchool {
-    #[serde(rename = "specs")]
-    specializari_short: Vec<SpecShort>,
-    #[serde(rename = "spec_data")]
-    specializari: std::collections::HashMap<i32, FullSpec>,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum StatusData<T> {
-    Success(T),
-    Error(String),
-}
-
-#[derive(Serialize)]
-struct Status<T> {
-    #[serde(rename = "type")]
-    result_type: String,
-    data: StatusData<T>,
 }
