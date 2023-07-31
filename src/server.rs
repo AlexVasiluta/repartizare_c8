@@ -9,7 +9,7 @@ use axum::{extract::Path, response::Json, routing::get, Extension, Router};
 use serde::ser::SerializeMap;
 use serde::Serialize;
 
-const AVAILABLE_YEARS: [i32; 3] = [2020, 2021, 2022];
+const AVAILABLE_YEARS: [i32; 4] = [2020, 2021, 2022, 2023];
 
 async fn years() -> Json<Status<Vec<i32>>> {
     Status::success(Vec::from(AVAILABLE_YEARS))
