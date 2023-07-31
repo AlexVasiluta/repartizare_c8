@@ -8,4 +8,4 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
 COPY --from=builder /usr/local/cargo/bin/repartizare_c8 .
-CMD ["/bin/sh" , "-c", "./repartizare_c8 server $DATA_DIR"]
+CMD ["/bin/sh" , "-c", "./repartizare_c8 server --path $DATA_DIR"]

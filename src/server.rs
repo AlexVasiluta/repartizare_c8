@@ -64,7 +64,7 @@ pub async fn run_server(db_prefix: String, port: u16) -> Result<(), Box<dyn std:
         .layer(Extension(Arc::new(DB::new(db_prefix))))
         .fallback(callback.into_service());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await?;
